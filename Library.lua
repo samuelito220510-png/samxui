@@ -5,6 +5,7 @@ local Teams = game:GetService('Teams');
 local Players = game:GetService('Players');
 local RunService = game:GetService('RunService')
 local TweenService = game:GetService('TweenService');
+local HttpService = game:GetService('HttpService');
 local RenderStepped = RunService.RenderStepped;
 local LocalPlayer = Players.LocalPlayer;
 local Mouse = LocalPlayer:GetMouse();
@@ -29,11 +30,12 @@ local Library = {
 
     HudRegistry = {};
 
-    FontColor = Color3.fromRGB(255, 255, 255);
-    MainColor = Color3.fromRGB(28, 28, 28);
-    BackgroundColor = Color3.fromRGB(20, 20, 20);
-    AccentColor = Color3.fromRGB(0, 85, 255);
-    OutlineColor = Color3.fromRGB(50, 50, 50);
+    -- ParceHub (default theme)
+    FontColor = Color3.fromRGB(242, 242, 242);
+    MainColor = Color3.fromRGB(24, 24, 27);
+    BackgroundColor = Color3.fromRGB(17, 17, 19);
+    AccentColor = Color3.fromRGB(255, 196, 0);
+    OutlineColor = Color3.fromRGB(44, 44, 49);
     RiskColor = Color3.fromRGB(255, 50, 50),
 
     Black = Color3.new(0, 0, 0);
@@ -46,8 +48,10 @@ local Library = {
     GroupboxTransparency = 0.3;
 
     -- Effects a theme can change. Colors may be Color3 or hex strings.
-    -- Animation: 'None' | 'Shimmer' | 'Rainbow' | 'Ink' | 'Pulse' | 'Wave' | 'Flicker'
+    -- Background accepts an Image id, a Decal id (converted automatically), a url or 'None'.
+    -- Animation: 'None' | 'Shimmer' | 'Rainbow' | 'Ink' | 'Pulse' | 'Wave' | 'Flicker' | 'Palette'
     -- Particles: 'None' | 'Rise' | 'Fall'
+    -- Palette: list of colors used by the 'Palette' animation
     DefaultEffects = {
         Background = '138821870465194';
         BackgroundTint = Color3.fromRGB(255, 255, 255);
@@ -435,11 +439,11 @@ do
     local PARTICLE_COUNT = 22;
     local AnimationClock = 0;
 
-    local ValidAnimations = { None = true; Shimmer = true; Rainbow = true; Ink = true; Pulse = true; Wave = true; Flicker = true; };
+    local ValidAnimations = { None = true; Shimmer = true; Rainbow = true; Ink = true; Pulse = true; Wave = true; Flicker = true; Palette = true; };
     local ValidParticles = { None = true; Rise = true; Fall = true; };
 
     -- How far apart (in animation time) the first and last keypoint of a strip are
-    local AnimationSpread = { Rainbow = 4; Ink = 3; Wave = 3; Pulse = 0.6; Flicker = 1; };
+    local AnimationSpread = { Rainbow = 4; Ink = 3; Wave = 3; Pulse = 0.6; Flicker = 1; Palette = 1.6; };
 
     local function ToColor3(Value, Fallback)
         if typeof(Value) == 'Color3' then
@@ -457,6 +461,37 @@ do
         return Fallback;
     end;
 
+    local ResolvedImages = {};
+    local GetCustomAsset = getcustomasset or getsynasset;
+
+    -- Downloads the asset thumbnail and loads it as a custom asset (works for Decals and Images)
+    local function LoadThumbnail(Id)
+        if not (GetCustomAsset and writefile and isfile) then
+            return;
+        end;
+
+        local Path = 'samxui_bg_' .. Id .. '.png';
+
+        if not isfile(Path) then
+            local Success, Body = pcall(game.HttpGet, game, 'https://thumbnails.roblox.com/v1/assets?assetIds=' .. Id .. '&returnPolicy=PlaceHolder&size=768x432&format=Png&isCircular=false');
+            if not Success then return end;
+
+            local Decoded, Data = pcall(HttpService.JSONDecode, HttpService, Body);
+            local Entry = Decoded and type(Data) == 'table' and Data.data and Data.data[1];
+            if not (Entry and Entry.state == 'Completed' and Entry.imageUrl) then return end;
+
+            local Downloaded, Png = pcall(game.HttpGet, game, Entry.imageUrl);
+            if not Downloaded then return end;
+
+            writefile(Path, Png);
+        end;
+
+        local Loaded, Asset = pcall(GetCustomAsset, Path);
+        return Loaded and Asset or nil;
+    end;
+
+    -- ImageLabels can't show Decal ids, so a Decal is turned into its real image first.
+    -- Can yield (http), so call it from a separate thread.
     local function ResolveImage(Id)
         if (not Id) or Id == '' or Id == 'None' then
             return '';
@@ -464,11 +499,31 @@ do
 
         Id = tostring(Id);
 
-        if Id:match('^%d+$') then
-            return 'rbxassetid://' .. Id;
+        if not Id:match('^%d+$') then
+            return Id;
         end;
 
-        return Id;
+        if ResolvedImages[Id] then
+            return ResolvedImages[Id];
+        end;
+
+        local Result;
+
+        -- 1) Decal -> its Texture
+        local Success, Objects = pcall(function()
+            return game:GetObjects('rbxassetid://' .. Id);
+        end);
+
+        if Success and type(Objects) == 'table' and typeof(Objects[1]) == 'Instance' and Objects[1]:IsA('Decal') and Objects[1].Texture ~= '' then
+            Result = Objects[1].Texture;
+        end;
+
+        -- 2) thumbnail as a custom asset, 3) assume it already is an Image id
+        Result = Result or LoadThumbnail(Id) or ('rbxassetid://' .. Id);
+
+        ResolvedImages[Id] = Result;
+
+        return Result;
     end;
 
     function Library:GetSecondaryColor()
@@ -498,6 +553,21 @@ do
             local Dip = math.clamp(-math.noise(Phase * 4, 0.5) * 1.2, 0, 0.45);
 
             return Base:Lerp(Color3.new(0, 0, 0), Dip);
+        elseif Mode == 'Palette' then
+            -- smooth loop through every color of the palette
+            local Palette = Library.Effects.Palette;
+
+            if type(Palette) ~= 'table' or #Palette < 2 then
+                Palette = { A, Library:GetSecondaryColor() };
+            end;
+
+            local Count = #Palette;
+            local T = (Phase * 0.25) % Count;
+            local Idx = math.floor(T);
+            local F = T - Idx;
+            F = F * F * (3 - 2 * F);
+
+            return Palette[Idx + 1]:Lerp(Palette[(Idx + 1) % Count + 1], F);
         end;
 
         return A;
@@ -633,8 +703,19 @@ do
 
         function Layer:Refresh()
             local Effects = Library.Effects;
+            local Background = Effects.Background;
 
-            Image.Image = ResolveImage(Effects.Background);
+            Layer.Background = Background;
+
+            task.spawn(function()
+                local Resolved = ResolveImage(Background);
+
+                -- the theme may have changed again while we were resolving
+                if Layer.Background == Background then
+                    Image.Image = Resolved;
+                end;
+            end);
+
             Image.ImageColor3 = Effects.BackgroundTint;
             ParticleHolder.Visible = Effects.Particles ~= 'None';
         end;
@@ -687,6 +768,16 @@ do
         New.ParticleColor = ToColor3(New.ParticleColor, nil);
         New.AnimationSpeed = tonumber(New.AnimationSpeed) or 1;
 
+        if type(New.Palette) == 'table' then
+            local Palette = {};
+
+            for _, Color in next, New.Palette do
+                table.insert(Palette, ToColor3(Color, White));
+            end;
+
+            New.Palette = Palette;
+        end;
+
         if not ValidAnimations[New.Animation] then
             New.Animation = 'Shimmer';
         end;
@@ -715,13 +806,30 @@ do
         local Data = {};
 
         for Key, Value in next, Library.Effects do
-            Data[Key] = typeof(Value) == 'Color3' and Value:ToHex() or Value;
+            if typeof(Value) == 'Color3' then
+                Data[Key] = Value:ToHex();
+            elseif type(Value) == 'table' then
+                local List = {};
+
+                for Idx, Color in next, Value do
+                    List[Idx] = typeof(Color) == 'Color3' and Color:ToHex() or Color;
+                end;
+
+                Data[Key] = List;
+            else
+                Data[Key] = Value;
+            end;
         end;
 
         return Data;
     end;
 
-    Library:SetEffects();
+    -- ParceHub (default theme): minimal yellow / blue / red
+    Library:SetEffects({
+        Animation = 'Palette';
+        AnimationSpeed = 0.8;
+        Palette = { 'ffc400', '2d6cff', 'ff3d3d' };
+    });
 
     Library:GiveSignal(RenderStepped:Connect(function(Delta)
         AnimationClock = AnimationClock + Delta * Library.Effects.AnimationSpeed;
